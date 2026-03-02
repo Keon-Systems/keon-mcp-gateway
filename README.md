@@ -147,6 +147,27 @@ Expected result:
 
 The demo mock runtime is [`examples/mock_runtime_server.py`](./examples/mock_runtime_server.py).
 
+## LangChain Adapter
+
+[`examples/langchain_keon_tool.py`](./examples/langchain_keon_tool.py) is the minimal LangChain wrapper:
+
+```python
+tool = build_keon_governed_execute_tool(
+    gateway_url="http://localhost:5000",
+    bearer_token=os.environ["KEON_MCP_BEARER_TOKEN"],
+    tenant_id="tnt_123",
+    actor_id="usr_456",
+)
+
+result = tool.invoke({
+    "purpose": "Summarize recent sent emails for weekly status update",
+    "action": "summarize",
+    "resource_type": "email",
+    "resource_scope": "mailbox:sent",
+    "params": {"window_days": 7, "max_items": 25}
+})
+```
+
 ## Tool Schemas
 
 Minimal tool metadata lives in:
