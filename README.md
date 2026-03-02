@@ -110,6 +110,43 @@ dotnet run --project src\Keon.McpGateway\Keon.McpGateway.csproj
 
 See [`examples/invoke_client.py`](./examples/invoke_client.py) for a working client snippet.
 
+## AI Assistant Trust Failure Demo
+
+The demo harness uses the real MCP invoke path and the real schema envelope.
+
+Prerequisites:
+
+```powershell
+pip install requests pyjwt cryptography fastapi uvicorn
+```
+
+### Demo A: Runtime Down
+
+```powershell
+.\examples\demo_trust_failure_runtime_down.ps1
+```
+
+Expected result:
+
+- gateway returns fail-closed because runtime decide cannot be reached
+- ingress SQLite still contains `directive -> intent -> outcome`
+- terminal outcome contains `error_code=RUNTIME_DECIDE_FAILED`
+
+### Demo B: Policy Deny Stops Summarization
+
+```powershell
+.\examples\demo_policy_deny_blocks_summarize.ps1
+```
+
+Expected result:
+
+- mock runtime denies `mailbox:sent` summarization
+- no execute call is made
+- ingress SQLite contains `directive -> intent -> outcome`
+- terminal outcome contains `terminal_status=denied`
+
+The demo mock runtime is [`examples/mock_runtime_server.py`](./examples/mock_runtime_server.py).
+
 ## Tool Schemas
 
 Minimal tool metadata lives in:
