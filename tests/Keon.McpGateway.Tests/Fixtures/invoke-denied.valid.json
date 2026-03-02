@@ -1,0 +1,22 @@
+{
+  "correlation_id": "c01J9Z8Q6X4J5Y2P9H3K8M7N6",
+  "tool": "keon.governed.execute.v1",
+  "ok": true,
+  "decision": {
+    "status": "denied",
+    "policy_hash": "sha256:1ad2aa91",
+    "policy_id": "dlp.mail.summarize",
+    "policy_version": "2026-03-01",
+    "reason_code": "SENSITIVITY_LABEL_BLOCKED"
+  },
+  "result": null,
+  "receipts": {
+    "directive": "rcpt_dir_01J9Z9",
+    "intent": "rcpt_int_01J9Z9",
+    "request": null,
+    "decision": "rcpt_dec_01J9Z9",
+    "execution": null,
+    "outcome": "rcpt_out_01J9Z9",
+    "evidence_pack": null
+  }
+}

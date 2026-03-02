@@ -1,0 +1,5 @@
+{
+  "tenant_id": "tnt_123",
+  "actor_id": "usr_456",
+  "include_schemas": true
+}

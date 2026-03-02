@@ -1,0 +1,24 @@
+{
+  "correlation_id": "c01J9Z8Q6X4J5Y2P9H3K8M7N6",
+  "tool": "keon.governed.execute.v1",
+  "ok": true,
+  "decision": {
+    "status": "approved",
+    "policy_hash": "sha256:9c1af02e",
+    "policy_id": "dlp.mail.summarize",
+    "policy_version": "2026-03-01"
+  },
+  "result": {
+    "summary": "done",
+    "items_considered": 18
+  },
+  "receipts": {
+    "directive": "rcpt_dir_01J9Z9",
+    "intent": "rcpt_int_01J9Z9",
+    "request": "rcpt_req_01J9Z9",
+    "decision": "rcpt_dec_01J9Z9",
+    "execution": "rcpt_exe_01J9Z9",
+    "outcome": "rcpt_out_01J9Z9",
+    "evidence_pack": "pack_01J9ZA"
+  }
+}

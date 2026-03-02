@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://keon.systems/contracts/hardening/hardening_attestation.v1.schema.json",
+  "title": "Keon Hardening Attestation v1",
+  "description": "Normative schema for the input payload submitted to the keon.launch.hardening.v1 MCP tool. Each invocation attests to the completion of one or more launch manifest items (Steel or Armor), linking them to governed execution evidence. The idempotency_key prevents double-submission. Forward-only transition rule: the runtime MUST reject any attestation that would move a manifest item to a status earlier in the progression (not_started → in_progress → complete). Backward transitions are always rejected.",
+  "type": "object",
+  "required": [
+    "contract",
+    "schema_version",
+    "workflow_ref",
+    "manifest_ref",
+    "idempotency_key",
+    "attested_items"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "contract": {
+      "type": "string",
+      "const": "keon.launch.hardening.v1",
+      "description": "Contract identifier. Must be exactly 'keon.launch.hardening.v1'."
+    },
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Schema version. Must be 1."
+    },
+    "workflow_ref": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Reference to the hardening workflow DAG definition file. Typically a relative path or content-addressed ref. Example: 'launch/keon-v1.0.0-hardening-workflow.yaml' or 'sha256:<hex>'."
+    },
+    "manifest_ref": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Reference to the launch manifest ledger. Typically a relative path or content-addressed ref. Example: 'launch/keon-v1.0.0-launch-manifest.yaml' or 'sha256:<hex>'."
+    },
+    "idempotency_key": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Content-addressed idempotency key. The runtime MUST return the cached result for any subsequent submission with the same key. Recommended derivation: sha256(jcs({ workflow_ref, manifest_ref, attested_item_ids_sorted })). Format: 'sha256:' followed by 64 lowercase hex characters."
+    },
+    "attested_items": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/attestedItem" },
+      "description": "One or more manifest items being attested in this submission. Each item must reference a valid manifest ID and provide at least one piece of evidence."
+    },
+    "submitted_at_utc": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp of submission. Informational; set by the runtime if absent."
+    },
+    "submitted_by": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Actor ID or service identity submitting the attestation. Optional; may be omitted for automated submissions where the runtime derives identity from the auth context."
+    },
+    "dry_run": {
+      "type": "boolean",
+      "description": "If true, the runtime validates the attestation and simulates the transition without persisting any state changes. Returns a dry_run_result with the proposed transition. Default: false.",
+      "default": false
+    }
+  },
+
+  "$defs": {
+    "attestedItem": {
+      "type": "object",
+      "required": ["item_id", "target_status", "evidence"],
+      "additionalProperties": false,
+      "properties": {
+        "item_id": {
+          "type": "string",
+          "pattern": "^(STEEL|ARMOR|POST)-\\d{3}$",
+          "description": "Launch manifest item ID being attested. Must match an existing item in the referenced manifest."
+        },
+        "target_status": {
+          "type": "string",
+          "enum": ["in_progress", "complete"],
+          "description": "The status this item is being transitioned to. FORWARD-ONLY RULE: runtime MUST reject if target_status is not strictly later in the progression than the item's current status. Only 'in_progress' and 'complete' are valid targets (cannot attest 'not_started' or 'blocked')."
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/evidenceRef" },
+          "description": "Evidence supporting this attestation. At least one evidence reference required. For target_status=complete, at least one evidence item MUST be a pack or artifact type."
+        },
+        "notes": {
+          "type": "string",
+          "description": "Optional human-readable notes about this attestation. Included verbatim in the governed run receipt."
+        }
+      }
+    },
+
+    "evidenceRef": {
+      "type": "object",
+      "required": ["type", "ref"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["pack", "artifact", "link"],
+          "description": "Evidence reference type. pack: a keon.evidence.pack.v1 content-addressed pack (ref = pack_id). artifact: a content-addressed artifact blob (ref = sha256:<hex> of the artifact bytes). link: an external URL or document reference (ref = URL or identifier string)."
+        },
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Reference value. For type=pack: must match ^sha256:[0-9a-f]{64}$. For type=artifact: must match ^sha256:[0-9a-f]{64}$. For type=link: a URL or human-readable identifier."
+        },
+        "label": {
+          "type": "string",
+          "description": "Optional human-readable label for this evidence reference. E.g., 'Chaos test run — 2026-02-28', 'Ed25519 test vectors', 'NIST SP 800-186 compliance report'."
+        },
+        "pack_selector": {
+          "$ref": "#/$defs/packSelector",
+          "description": "For type=pack only: the selector used to produce this pack. MUST be present when type=pack so the verifier can confirm the pack covers the correct scope."
+        }
+      }
+    },
+
+    "packSelector": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": true,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["run", "receipt", "correlation", "task", "time_range"],
+          "description": "Selector type matching the pack_manifest.json selector.type field."
+        }
+      },
+      "description": "Snapshot of the selector embedded in the referenced pack_manifest.json. Used by the verifier to confirm linkage integrity: the pack's selector.type=task with selector.task_id matching the attested item_id, or an explicit attestation_run_id linking them."
+    }
+  }
+}
