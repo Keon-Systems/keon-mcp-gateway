@@ -9,6 +9,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<RuntimeOptions>(builder.Configuration.GetSection("Runtime"));
 builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection("Auth"));
+builder.Services.Configure<IngressSpineOptions>(builder.Configuration.GetSection("IngressSpine"));
 builder.Services.Configure<SchemaOptions>(options =>
 {
     options.SchemaPath = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "..", "contracts", "mcp_gateway.v1.schema.json"));
@@ -20,6 +21,15 @@ builder.Services.AddSingleton<SchemaRegistry>();
 builder.Services.AddSingleton<JwtValidator>();
 builder.Services.AddSingleton<DirectiveFactory>();
 builder.Services.AddSingleton<IntentFactory>();
+builder.Services.AddSingleton<InvokeTerminalWriter>();
+builder.Services.AddSingleton<IIngressSpineSink>(sp =>
+{
+    var options = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<IngressSpineOptions>>().Value;
+    return options.ParsedMode == IngressSpineMode.Off
+        ? new NoopIngressSpineSink()
+        : new SqliteIngressSpineSink(sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<IngressSpineOptions>>());
+});
+builder.Services.AddSingleton<IngressSpineEmitter>();
 builder.Services.AddSingleton<ToolRegistryAccessor>();
 builder.Services.AddSingleton<GovernedExecuteHandler>();
 builder.Services.AddSingleton<LaunchHardeningHandler>();
@@ -88,6 +98,8 @@ app.MapPost("/mcp/tools/invoke", async (
     ToolRegistry toolRegistry,
     DirectiveFactory directiveFactory,
     IntentFactory intentFactory,
+    IngressSpineEmitter ingressSpineEmitter,
+    InvokeTerminalWriter terminalWriter,
     CancellationToken ct) =>
 {
     var invokeRequestResult = JsonSerializerHelper.Deserialize<ToolsInvokeRequest>(requestBody);
@@ -121,25 +133,47 @@ app.MapPost("/mcp/tools/invoke", async (
             statusCode: StatusCodes.Status500InternalServerError);
     }
 
+    try
+    {
+        await ingressSpineEmitter.AppendDirectiveAsync(directive, ct);
+    }
+    catch (IngressSpineException ex)
+    {
+        var failClosed = McpResults.Error(correlationId, request.Tool, "GOVERNANCE_FAIL_CLOSED", ex.Message, StatusCodes.Status500InternalServerError, false, directive.ReceiptId);
+        return Results.Json(failClosed, statusCode: StatusCodes.Status500InternalServerError);
+    }
+
     var handler = toolRegistry.Resolve(request.Tool);
     if (handler is null)
     {
-        return Results.Json(
-            McpResults.Error(correlationId, request.Tool, "MCP_TOOL_NOT_FOUND", $"Unknown tool: {request.Tool}", StatusCodes.Status404NotFound, false, directive.ReceiptId),
-            statusCode: StatusCodes.Status404NotFound);
+        var missingTool = McpResults.Error(correlationId, request.Tool, "MCP_TOOL_NOT_FOUND", $"Unknown tool: {request.Tool}", StatusCodes.Status404NotFound, false, directive.ReceiptId);
+        var finalizedMissingTool = await terminalWriter.FinalizeAsync(StatusCodes.Status404NotFound, missingTool, correlationId, request.Tool, directive, ingressSpineEmitter, ct);
+        return Results.Json(finalizedMissingTool.Body, statusCode: finalizedMissingTool.StatusCode);
     }
 
     var intent = intentFactory.Create(request, directive);
+    try
+    {
+        await ingressSpineEmitter.AppendIntentAsync(intent, ct);
+    }
+    catch (IngressSpineException ex)
+    {
+        var failClosed = McpResults.Error(correlationId, request.Tool, "GOVERNANCE_FAIL_CLOSED", ex.Message, StatusCodes.Status500InternalServerError, false, directive.ReceiptId);
+        var finalizedFailClosed = await terminalWriter.FinalizeAsync(StatusCodes.Status500InternalServerError, failClosed, correlationId, request.Tool, directive, ingressSpineEmitter, ct);
+        return Results.Json(finalizedFailClosed.Body, statusCode: finalizedFailClosed.StatusCode);
+    }
+
     var result = await handler.InvokeAsync(new ToolInvocationContext(request, auth.Principal.Principal, directive, intent), ct);
     var responseValidation = schemas.ValidateDefinition("ToolsInvokeResponse", JsonSerializerHelper.ToNode(result.Body));
     if (!responseValidation.IsValid)
     {
-        return Results.Json(
-            McpResults.Error(correlationId, request.Tool, "GOVERNANCE_FAIL_CLOSED", responseValidation.Message, StatusCodes.Status500InternalServerError, false, directive.ReceiptId),
-            statusCode: StatusCodes.Status500InternalServerError);
+        var failClosed = McpResults.Error(correlationId, request.Tool, "GOVERNANCE_FAIL_CLOSED", responseValidation.Message, StatusCodes.Status500InternalServerError, false, directive.ReceiptId);
+        var finalizedFailClosed = await terminalWriter.FinalizeAsync(StatusCodes.Status500InternalServerError, failClosed, correlationId, request.Tool, directive, ingressSpineEmitter, ct);
+        return Results.Json(finalizedFailClosed.Body, statusCode: finalizedFailClosed.StatusCode);
     }
 
-    return Results.Json(result.Body, statusCode: result.StatusCode);
+    var finalized = await terminalWriter.FinalizeAsync(result.StatusCode, result.Body, correlationId, request.Tool, directive, ingressSpineEmitter, ct);
+    return Results.Json(finalized.Body, statusCode: finalized.StatusCode);
 });
 
 app.Run();

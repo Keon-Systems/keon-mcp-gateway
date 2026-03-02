@@ -13,6 +13,7 @@ The gateway enforces:
 - per-tool scope enforcement
 - `Decide` before any `Execute`
 - canonical MCP request and response validation against [`contracts/mcp_gateway.v1.schema.json`](./contracts/mcp_gateway.v1.schema.json)
+- optional durable ingress spine emission for `directive`, `intent`, and terminal `outcome`
 
 ## Tools
 
@@ -44,6 +45,10 @@ http://localhost:5000
     "TimeoutSeconds": 5,
     "MaxRetries": 2
   },
+  "IngressSpine": {
+    "Mode": "Off",
+    "ConnectionString": "Data Source=ingress-spine.db"
+  },
   "Auth": {
     "Issuer": "keon-auth",
     "Audience": "keon-mcp-gateway",
@@ -53,6 +58,12 @@ http://localhost:5000
   }
 }
 ```
+
+`IngressSpine:Mode`:
+
+- `Off`: no ingress persistence
+- `BestEffort`: append failures are logged and never block request completion
+- `Required`: append failures are fail-closed; if `directive` append fails the runtime is never called
 
 ### Point at Keon SaaS Runtime
 
