@@ -157,15 +157,13 @@ app.MapGet("/mcp/admin/ingress/{correlationId}", async (
 
     try
     {
-        await using var connection = new SqliteConnection(ingressSpineOptions.Value.ConnectionString);
+        await using var connection = new SqliteConnection(SqliteConnectionStringFactory.Normalize(ingressSpineOptions.Value.ConnectionString));
         await connection.OpenAsync(ct);
 
         var pragmaCommand = connection.CreateCommand();
         pragmaCommand.CommandText =
             """
             PRAGMA busy_timeout = 5000;
-            PRAGMA journal_mode = DELETE;
-            PRAGMA synchronous = NORMAL;
             """;
         await pragmaCommand.ExecuteNonQueryAsync(ct);
 

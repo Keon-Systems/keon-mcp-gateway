@@ -50,7 +50,7 @@ public sealed class SqliteIngressSpineSink : IIngressSpineSink
 
     public SqliteIngressSpineSink(IOptions<IngressSpineOptions> options)
     {
-        _connectionString = options.Value.ConnectionString;
+        _connectionString = SqliteConnectionStringFactory.Normalize(options.Value.ConnectionString);
     }
 
     public async Task AppendAsync(IngressSpineEvent ingressEvent, CancellationToken ct)
@@ -110,11 +110,12 @@ public sealed class SqliteIngressSpineSink : IIngressSpineSink
                 {
                     await using var connection = new SqliteConnection(_connectionString);
                     await connection.OpenAsync(token);
-                    await ConfigureConnectionAsync(connection, token);
 
                     var command = connection.CreateCommand();
                     command.CommandText =
                         """
+                        PRAGMA journal_mode = DELETE;
+                        PRAGMA synchronous = NORMAL;
                         CREATE TABLE IF NOT EXISTS events(
                           event_id TEXT PRIMARY KEY,
                           event_type TEXT NOT NULL,
@@ -143,8 +144,6 @@ public sealed class SqliteIngressSpineSink : IIngressSpineSink
         command.CommandText =
             """
             PRAGMA busy_timeout = 5000;
-            PRAGMA journal_mode = DELETE;
-            PRAGMA synchronous = NORMAL;
             """;
         await command.ExecuteNonQueryAsync(ct);
     }
@@ -170,6 +169,19 @@ public sealed class SqliteIngressSpineSink : IIngressSpineSink
 
     private static bool IsTransient(SqliteException ex)
         => ex.SqliteErrorCode is 5 or 6;
+}
+
+public static class SqliteConnectionStringFactory
+{
+    public static string Normalize(string rawConnectionString)
+    {
+        var builder = new SqliteConnectionStringBuilder(rawConnectionString)
+        {
+            Pooling = false,
+            DefaultTimeout = 5
+        };
+        return builder.ConnectionString;
+    }
 }
 
 public sealed class IngressSpineException : Exception
