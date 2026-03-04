@@ -17,8 +17,8 @@ public sealed class ToolRegistry
             [launchHardeningHandler.Name] = launchHardeningHandler
         };
 
-        _gatewaySchema = JsonNode.Parse(File.ReadAllText(Path.GetFullPath(Path.Combine(environment.ContentRootPath, "..", "..", "contracts", "mcp_gateway.v1.schema.json"))))!.AsObject();
-        _hardeningSchema = JsonNode.Parse(File.ReadAllText(Path.GetFullPath(Path.Combine(environment.ContentRootPath, "..", "..", "vendor", "keon-contracts", "Hardening", "schema", "hardening_attestation.v1.schema.json"))))!.AsObject();
+        _gatewaySchema = JsonNode.Parse(File.ReadAllText(SchemaPathResolver.ResolveGatewaySchema(environment.ContentRootPath)))!.AsObject();
+        _hardeningSchema = JsonNode.Parse(File.ReadAllText(SchemaPathResolver.ResolveHardeningSchema(environment.ContentRootPath)))!.AsObject();
     }
 
     public IReadOnlyList<ToolDefinition> ListTools(bool includeSchemas)
