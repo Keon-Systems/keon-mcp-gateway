@@ -1,4 +1,6 @@
 using System.Text.Json.Nodes;
+using System.Threading.RateLimiting;
+using Keon.McpGateway;
 using Keon.McpGateway.Auth;
 using Keon.McpGateway.Contracts;
 using Keon.McpGateway.Runtime;
@@ -10,9 +12,47 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.Configure<RuntimeOptions>(builder.Configuration.GetSection("Runtime"));
 builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection("Auth"));
 builder.Services.Configure<IngressSpineOptions>(builder.Configuration.GetSection("IngressSpine"));
+builder.Services.Configure<RateLimitingOptions>(builder.Configuration.GetSection("RateLimiting"));
 builder.Services.Configure<SchemaOptions>(options =>
 {
     options.SchemaPath = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "..", "contracts", "mcp_gateway.v1.schema.json"));
+});
+builder.Services.AddRateLimiter(options =>
+{
+    options.OnRejected = async (context, ct) =>
+    {
+        var correlationId = CorrelationIdHelper.ResolveOrCreate(context.HttpContext.Request.Headers["x-correlation-id"].FirstOrDefault());
+        var response = McpResults.Error(correlationId, "keon.governed.execute.v1", "MCP_RATE_LIMITED", "Request rate limit exceeded.", StatusCodes.Status429TooManyRequests, true);
+        context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+        context.HttpContext.Response.ContentType = "application/json";
+        await context.HttpContext.Response.WriteAsJsonAsync(response, cancellationToken: ct);
+    };
+
+    options.AddPolicy("mcp_public", httpContext =>
+    {
+        var rateLimitingOptions = httpContext.RequestServices.GetRequiredService<Microsoft.Extensions.Options.IOptions<RateLimitingOptions>>().Value;
+        if (!rateLimitingOptions.Enabled)
+        {
+            return RateLimitPartition.GetNoLimiter("mcp_public_disabled");
+        }
+
+        var path = httpContext.Request.Path.ToString();
+        var bucket =
+            path.StartsWith("/mcp/tools/list", StringComparison.OrdinalIgnoreCase) ? "/mcp/tools/list" :
+            path.StartsWith("/mcp/tools/invoke", StringComparison.OrdinalIgnoreCase) ? "/mcp/tools/invoke" :
+            "/mcp/other";
+
+        return RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: $"mcp_public:{bucket}",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = rateLimitingOptions.PermitLimit,
+                Window = TimeSpan.FromSeconds(rateLimitingOptions.WindowSeconds),
+                QueueLimit = 0,
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                AutoReplenishment = true
+            });
+    });
 });
 
 builder.Services.AddHttpClient();
@@ -44,6 +84,7 @@ builder.Services.AddSingleton<ToolRegistry>(sp =>
 });
 
 var app = builder.Build();
+app.UseRateLimiter();
 
 app.MapGet("/health", async (RuntimeClient runtimeClient, CancellationToken ct) =>
 {
@@ -88,7 +129,8 @@ app.MapPost("/mcp/tools/list", async (
     }
 
     return Results.Json(response);
-});
+})
+.RequireRateLimiting("mcp_public");
 
 app.MapPost("/mcp/tools/invoke", async (
     HttpContext httpContext,
@@ -174,7 +216,8 @@ app.MapPost("/mcp/tools/invoke", async (
 
     var finalized = await terminalWriter.FinalizeAsync(result.StatusCode, result.Body, correlationId, request.Tool, directive, ingressSpineEmitter, ct);
     return Results.Json(finalized.Body, statusCode: finalized.StatusCode);
-});
+})
+.RequireRateLimiting("mcp_public");
 
 app.Run();
 
