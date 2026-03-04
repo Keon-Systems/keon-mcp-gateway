@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using System.Text.Json;
 using Keon.McpGateway.Contracts;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
@@ -44,45 +45,73 @@ public sealed class NoopIngressSpineSink : IIngressSpineSink
 public sealed class SqliteIngressSpineSink : IIngressSpineSink
 {
     private readonly string _connectionString;
+    private readonly string _rawConnectionString;
+    private readonly bool _fallbackEnabled;
     private readonly SemaphoreSlim _initGate = new(1, 1);
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private volatile bool _initialized;
+    private volatile bool _forceFallback;
 
     public SqliteIngressSpineSink(IOptions<IngressSpineOptions> options)
     {
-        _connectionString = SqliteConnectionStringFactory.Normalize(options.Value.ConnectionString);
+        _rawConnectionString = options.Value.ConnectionString;
+        _connectionString = SqliteConnectionStringFactory.Normalize(_rawConnectionString);
+        _fallbackEnabled = IngressSpineFallbackStore.IsSupported(_rawConnectionString);
     }
 
     public async Task AppendAsync(IngressSpineEvent ingressEvent, CancellationToken ct)
     {
-        await EnsureInitializedAsync(ct);
+        if (_forceFallback)
+        {
+            await IngressSpineFallbackStore.AppendAsync(_rawConnectionString, ingressEvent, ct);
+            return;
+        }
+
+        try
+        {
+            await EnsureInitializedAsync(ct);
+        }
+        catch (SqliteException ex) when (ShouldFallback(ex))
+        {
+            _forceFallback = true;
+            await IngressSpineFallbackStore.AppendAsync(_rawConnectionString, ingressEvent, ct);
+            return;
+        }
 
         await _writeGate.WaitAsync(ct);
         try
         {
-            await ExecuteWithRetryAsync(
-                async token =>
-                {
-                    await using var connection = new SqliteConnection(_connectionString);
-                    await connection.OpenAsync(token);
-                    await ConfigureConnectionAsync(connection, token);
+            try
+            {
+                await ExecuteWithRetryAsync(
+                    async token =>
+                    {
+                        await using var connection = new SqliteConnection(_connectionString);
+                        await connection.OpenAsync(token);
+                        await ConfigureConnectionAsync(connection, token);
 
-                    var command = connection.CreateCommand();
-                    command.CommandText =
-                        """
-                        INSERT INTO events(event_id, event_type, correlation_id, receipt_id, payload_json, created_utc)
-                        VALUES ($event_id, $event_type, $correlation_id, $receipt_id, $payload_json, $created_utc);
-                        """;
-                    command.Parameters.AddWithValue("$event_id", ingressEvent.EventId);
-                    command.Parameters.AddWithValue("$event_type", ingressEvent.EventType);
-                    command.Parameters.AddWithValue("$correlation_id", ingressEvent.CorrelationId);
-                    command.Parameters.AddWithValue("$receipt_id", ingressEvent.ReceiptId);
-                    command.Parameters.AddWithValue("$payload_json", ingressEvent.PayloadJson);
-                    command.Parameters.AddWithValue("$created_utc", ingressEvent.CreatedUtc.ToString("O"));
+                        var command = connection.CreateCommand();
+                        command.CommandText =
+                            """
+                            INSERT INTO events(event_id, event_type, correlation_id, receipt_id, payload_json, created_utc)
+                            VALUES ($event_id, $event_type, $correlation_id, $receipt_id, $payload_json, $created_utc);
+                            """;
+                        command.Parameters.AddWithValue("$event_id", ingressEvent.EventId);
+                        command.Parameters.AddWithValue("$event_type", ingressEvent.EventType);
+                        command.Parameters.AddWithValue("$correlation_id", ingressEvent.CorrelationId);
+                        command.Parameters.AddWithValue("$receipt_id", ingressEvent.ReceiptId);
+                        command.Parameters.AddWithValue("$payload_json", ingressEvent.PayloadJson);
+                        command.Parameters.AddWithValue("$created_utc", ingressEvent.CreatedUtc.ToString("O"));
 
-                    await command.ExecuteNonQueryAsync(token);
-                },
-                ct);
+                        await command.ExecuteNonQueryAsync(token);
+                    },
+                    ct);
+            }
+            catch (SqliteException ex) when (ShouldFallback(ex))
+            {
+                _forceFallback = true;
+                await IngressSpineFallbackStore.AppendAsync(_rawConnectionString, ingressEvent, ct);
+            }
         }
         finally
         {
@@ -175,6 +204,9 @@ public sealed class SqliteIngressSpineSink : IIngressSpineSink
 
     private static bool IsTransient(SqliteException ex)
         => ex.SqliteErrorCode is 5 or 6;
+
+    private bool ShouldFallback(SqliteException ex)
+        => _fallbackEnabled && ex.SqliteErrorCode is 1 or 5 or 6 or 8 or 10 or 14;
 }
 
 public static class SqliteConnectionStringFactory
@@ -187,6 +219,114 @@ public static class SqliteConnectionStringFactory
             DefaultTimeout = 5
         };
         return builder.ConnectionString;
+    }
+}
+
+public sealed record IngressSpineOracleEvent(string Type, string ReceiptId, string CreatedUtc, JsonObject? Payload);
+
+public static class IngressSpineFallbackStore
+{
+    private sealed record FallbackEvent(string Type, string ReceiptId, string PayloadJson, string CreatedUtc);
+
+    public static bool IsSupported(string rawConnectionString)
+        => TryGetDataSource(rawConnectionString, out var dataSource) &&
+           dataSource.StartsWith("/data/", StringComparison.OrdinalIgnoreCase);
+
+    public static async Task AppendAsync(string rawConnectionString, IngressSpineEvent ingressEvent, CancellationToken ct)
+    {
+        var directory = ResolveFallbackDirectory(rawConnectionString);
+        if (directory is null)
+        {
+            throw new InvalidOperationException("Fallback spine directory could not be resolved.");
+        }
+
+        Directory.CreateDirectory(directory);
+        var linePath = Path.Combine(directory, $"{ingressEvent.CorrelationId}.jsonl");
+        var entry = new FallbackEvent(
+            ingressEvent.EventType,
+            ingressEvent.ReceiptId,
+            ingressEvent.PayloadJson,
+            ingressEvent.CreatedUtc.ToString("O"));
+        await File.AppendAllTextAsync(linePath, JsonSerializer.Serialize(entry) + Environment.NewLine, ct);
+    }
+
+    public static async Task<List<IngressSpineOracleEvent>> ReadAsync(string rawConnectionString, string correlationId, CancellationToken ct)
+    {
+        var directory = ResolveFallbackDirectory(rawConnectionString);
+        if (directory is null)
+        {
+            return [];
+        }
+
+        var linePath = Path.Combine(directory, $"{correlationId}.jsonl");
+        if (!File.Exists(linePath))
+        {
+            return [];
+        }
+
+        var events = new List<IngressSpineOracleEvent>();
+        using var stream = File.Open(linePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var reader = new StreamReader(stream);
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            var line = await reader.ReadLineAsync(ct);
+            if (line is null)
+            {
+                break;
+            }
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            var parsed = JsonSerializerHelper.Deserialize<FallbackEvent>(line);
+            if (parsed.Value is null)
+            {
+                continue;
+            }
+
+            events.Add(new IngressSpineOracleEvent(
+                parsed.Value.Type,
+                parsed.Value.ReceiptId,
+                parsed.Value.CreatedUtc,
+                JsonNode.Parse(parsed.Value.PayloadJson) as JsonObject));
+        }
+
+        return events;
+    }
+
+    private static string? ResolveFallbackDirectory(string rawConnectionString)
+    {
+        if (!TryGetDataSource(rawConnectionString, out var dataSource))
+        {
+            return null;
+        }
+
+        if (!Path.IsPathRooted(dataSource))
+        {
+            return null;
+        }
+
+        var baseDir = Path.GetDirectoryName(dataSource);
+        return string.IsNullOrWhiteSpace(baseDir)
+            ? null
+            : Path.Combine(baseDir, "ingress_spine_fallback");
+    }
+
+    private static bool TryGetDataSource(string rawConnectionString, out string dataSource)
+    {
+        try
+        {
+            var builder = new SqliteConnectionStringBuilder(rawConnectionString);
+            dataSource = builder.DataSource ?? string.Empty;
+            return !string.IsNullOrWhiteSpace(dataSource);
+        }
+        catch
+        {
+            dataSource = string.Empty;
+            return false;
+        }
     }
 }
 

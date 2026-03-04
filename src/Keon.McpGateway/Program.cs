@@ -194,10 +194,26 @@ app.MapGet("/mcp/admin/ingress/{correlationId}", async (
 
         if (events.Count == 0)
         {
-            return Results.NotFound(new
+            var fallbackEvents = await IngressSpineFallbackStore.ReadAsync(ingressSpineOptions.Value.ConnectionString, correlationId, ct);
+            if (fallbackEvents.Count == 0)
+            {
+                return Results.NotFound(new
+                {
+                    correlation_id = correlationId,
+                    message = "No ingress events found."
+                });
+            }
+
+            return Results.Json(new
             {
                 correlation_id = correlationId,
-                message = "No ingress events found."
+                events = fallbackEvents.Select(e => new
+                {
+                    type = e.Type,
+                    receipt_id = e.ReceiptId,
+                    created_utc = e.CreatedUtc,
+                    payload = e.Payload
+                }).ToList()
             });
         }
 
@@ -211,6 +227,22 @@ app.MapGet("/mcp/admin/ingress/{correlationId}", async (
         ex.Message.Contains("no such table", StringComparison.OrdinalIgnoreCase) ||
         ex.Message.Contains("unable to open database file", StringComparison.OrdinalIgnoreCase))
     {
+        var fallbackEvents = await IngressSpineFallbackStore.ReadAsync(ingressSpineOptions.Value.ConnectionString, correlationId, ct);
+        if (fallbackEvents.Count > 0)
+        {
+            return Results.Json(new
+            {
+                correlation_id = correlationId,
+                events = fallbackEvents.Select(e => new
+                {
+                    type = e.Type,
+                    receipt_id = e.ReceiptId,
+                    created_utc = e.CreatedUtc,
+                    payload = e.Payload
+                }).ToList()
+            });
+        }
+
         return Results.NotFound(new
         {
             correlation_id = correlationId,
