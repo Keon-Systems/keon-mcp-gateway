@@ -54,6 +54,26 @@ builder.Services.AddRateLimiter(options =>
                 AutoReplenishment = true
             });
     });
+
+    options.AddPolicy("mcp_admin", httpContext =>
+    {
+        var rateLimitingOptions = httpContext.RequestServices.GetRequiredService<Microsoft.Extensions.Options.IOptions<RateLimitingOptions>>().Value;
+        if (!rateLimitingOptions.Enabled)
+        {
+            return RateLimitPartition.GetNoLimiter("mcp_admin_disabled");
+        }
+
+        return RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: "mcp_admin:/mcp/admin/ingress",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = rateLimitingOptions.AdminPermitLimit,
+                Window = TimeSpan.FromSeconds(rateLimitingOptions.WindowSeconds),
+                QueueLimit = 0,
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                AutoReplenishment = true
+            });
+    });
 });
 
 builder.Services.AddHttpClient();
@@ -190,7 +210,8 @@ app.MapGet("/mcp/admin/ingress/{correlationId}", async (
             message = "Ingress spine store not available."
         });
     }
-});
+})
+.RequireRateLimiting("mcp_admin");
 
 app.MapPost("/mcp/tools/list", async (
     HttpContext httpContext,
