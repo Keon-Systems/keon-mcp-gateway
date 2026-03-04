@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "keon.mcp.gateway.v1",
+  "title": "Keon MCP Gateway v1 Schemas",
+  "type": "object",
+  "$defs": {
+    "CorrelationId": { "type": "string", "minLength": 8 },
+    "TenantId": { "type": "string", "minLength": 1 },
+    "ActorId": { "type": "string", "minLength": 1 },
+    "IdempotencyKey": { "type": "string", "minLength": 1 },
+    "ToolName": {
+      "type": "string",
+      "enum": ["keon.governed.execute.v1", "keon.launch.hardening.v1"]
+    },
+    "ReceiptId": { "type": "string", "minLength": 1 },
+    "ReceiptRefs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "directive": { "anyOf": [{ "$ref": "#/$defs/ReceiptId" }, { "type": "null" }] },
+        "intent": { "anyOf": [{ "$ref": "#/$defs/ReceiptId" }, { "type": "null" }] },
+        "request": { "anyOf": [{ "$ref": "#/$defs/ReceiptId" }, { "type": "null" }] },
+        "decision": { "anyOf": [{ "$ref": "#/$defs/ReceiptId" }, { "type": "null" }] },
+        "execution": { "anyOf": [{ "$ref": "#/$defs/ReceiptId" }, { "type": "null" }] },
+        "outcome": { "anyOf": [{ "$ref": "#/$defs/ReceiptId" }, { "type": "null" }] },
+        "evidence_pack": { "anyOf": [{ "type": "string" }, { "type": "null" }] }
+      },
+      "required": ["directive", "intent", "decision", "execution", "outcome", "evidence_pack"]
+    },
+    "Decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "status": { "type": "string", "enum": ["approved", "denied"] },
+        "policy_hash": { "type": "string", "minLength": 8 },
+        "policy_id": { "type": "string" },
+        "policy_version": { "type": "string" },
+        "reason_code": { "type": "string" }
+      },
+      "required": ["status", "policy_hash"]
+    },
+    "Error": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "code": { "type": "string", "minLength": 3 },
+        "message": { "type": "string", "minLength": 1 },
+        "http_status": { "type": "integer", "minimum": 400, "maximum": 599 },
+        "retryable": { "type": "boolean" }
+      },
+      "required": ["code", "message", "http_status", "retryable"]
+    },
+    "Tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/ToolName" },
+        "version": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "required_scopes": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "risk_level": { "type": "string", "enum": ["low", "medium", "high"] },
+        "input_schema": { "type": "object" },
+        "output_schema": { "type": "object" }
+      },
+      "required": ["name", "version", "required_scopes", "risk_level"]
+    },
+    "ToolsListRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tenant_id": { "$ref": "#/$defs/TenantId" },
+        "actor_id": { "$ref": "#/$defs/ActorId" },
+        "correlation_id": { "anyOf": [{ "$ref": "#/$defs/CorrelationId" }, { "type": "null" }] },
+        "include_schemas": { "type": "boolean", "default": true }
+      },
+      "required": ["tenant_id", "actor_id"]
+    },
+    "ToolsListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "correlation_id": { "$ref": "#/$defs/CorrelationId" },
+        "tools": { "type": "array", "items": { "$ref": "#/$defs/Tool" } }
+      },
+      "required": ["correlation_id", "tools"]
+    },
+    "ToolsInvokeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tenant_id": { "$ref": "#/$defs/TenantId" },
+        "actor_id": { "$ref": "#/$defs/ActorId" },
+        "correlation_id": { "$ref": "#/$defs/CorrelationId" },
+        "idempotency_key": { "anyOf": [{ "$ref": "#/$defs/IdempotencyKey" }, { "type": "null" }] },
+        "tool": { "$ref": "#/$defs/ToolName" },
+        "arguments": { "type": "object" }
+      },
+      "required": ["tenant_id", "actor_id", "correlation_id", "tool", "arguments"]
+    },
+    "ToolsInvokeResponseSuccess": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "correlation_id": { "$ref": "#/$defs/CorrelationId" },
+        "tool": { "$ref": "#/$defs/ToolName" },
+        "ok": { "const": true },
+        "decision": { "$ref": "#/$defs/Decision" },
+        "result": { "type": ["object", "null"], "additionalProperties": true },
+        "receipts": { "$ref": "#/$defs/ReceiptRefs" }
+      },
+      "required": ["correlation_id", "tool", "ok", "decision", "receipts"]
+    },
+    "ToolsInvokeResponseDenied": {
+      "allOf": [
+        { "$ref": "#/$defs/ToolsInvokeResponseSuccess" },
+        {
+          "properties": {
+            "decision": {
+              "allOf": [
+                { "$ref": "#/$defs/Decision" },
+                { "properties": { "status": { "const": "denied" } }, "required": ["status"] }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "ToolsInvokeResponseError": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "correlation_id": { "$ref": "#/$defs/CorrelationId" },
+        "tool": { "$ref": "#/$defs/ToolName" },
+        "ok": { "const": false },
+        "error": { "$ref": "#/$defs/Error" },
+        "receipts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "directive": { "anyOf": [{ "$ref": "#/$defs/ReceiptId" }, { "type": "null" }] },
+            "intent": { "type": "null" },
+            "request": { "type": "null" },
+            "decision": { "type": "null" },
+            "execution": { "type": "null" },
+            "outcome": { "type": "null" },
+            "evidence_pack": { "type": "null" }
+          },
+          "required": ["directive", "intent", "decision", "execution", "outcome", "evidence_pack"]
+        }
+      },
+      "required": ["correlation_id", "tool", "ok", "error", "receipts"]
+    },
+    "ToolsInvokeResponse": {
+      "oneOf": [
+        { "$ref": "#/$defs/ToolsInvokeResponseError" },
+        { "$ref": "#/$defs/ToolsInvokeResponseSuccess" }
+      ]
+    },
+    "GovernedExecuteInputSchema": {
+      "type": "object",
+      "required": ["tenant_id", "actor_id", "action", "resource", "params"],
+      "properties": {
+        "tenant_id": { "type": "string" },
+        "actor_id": { "type": "string" },
+        "correlation_id": { "type": "string" },
+        "idempotency_key": { "type": "string" },
+        "purpose": { "type": "string", "description": "Required for high-risk ops; purpose binding for policy." },
+        "action": {
+          "type": "string",
+          "enum": ["summarize", "retrieve", "create", "update", "delete", "send", "classify", "execute"]
+        },
+        "resource": {
+          "type": "object",
+          "required": ["type"],
+          "properties": {
+            "type": { "type": "string", "description": "e.g., email, file, chat, ticket, crm_record" },
+            "id": { "type": "string" },
+            "scope": { "type": "string", "description": "e.g., mailbox:sent, sharepoint:site, s3:bucket" },
+            "labels": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "params": { "type": "object", "additionalProperties": true },
+        "mode": {
+          "type": "string",
+          "enum": ["decide_only", "decide_then_execute"],
+          "default": "decide_then_execute"
+        }
+      }
+    },
+    "GovernedExecuteOutputSchema": {
+      "type": "object",
+      "required": ["decision", "receipts"],
+      "properties": {
+        "decision": {
+          "type": "object",
+          "required": ["status", "policy_hash"],
+          "properties": {
+            "status": { "type": "string", "enum": ["approved", "denied"] },
+            "policy_hash": { "type": "string" },
+            "policy_id": { "type": "string" },
+            "policy_version": { "type": "string" },
+            "reason_code": { "type": "string" }
+          }
+        },
+        "result": { "type": "object", "additionalProperties": true },
+        "receipts": {
+          "type": "object",
+          "required": ["directive", "intent", "decision"],
+          "properties": {
+            "directive": { "type": "string" },
+            "intent": { "type": "string" },
+            "request": { "type": "string" },
+            "decision": { "type": "string" },
+            "execution": { "type": "string" },
+            "outcome": { "type": "string" },
+            "evidence_pack": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

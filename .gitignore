@@ -10,6 +10,9 @@
 *.userosscache
 *.sln.docstates
 *.env
+*.local.json
+appsettings.Development.json
+appsettings.Local.json
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
@@ -73,6 +76,8 @@ BenchmarkDotNet.Artifacts/
 project.lock.json
 project.fragment.lock.json
 artifacts/
+packages/
+.nuget/
 
 # ASP.NET Scaffolding
 ScaffoldingReadMe.txt
@@ -416,3 +421,14 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Container and runtime artifacts
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# OS junk
+.DS_Store
+Thumbs.db

@@ -1,0 +1,20 @@
+{
+  "correlation_id": "c01J9Z8Q6X4J5Y2P9H3K8M7N6",
+  "tool": "keon.governed.execute.v1",
+  "ok": false,
+  "error": {
+    "code": "MCP_SCOPE_DENIED",
+    "message": "Missing required scope: keon:execute",
+    "http_status": 403,
+    "retryable": false
+  },
+  "receipts": {
+    "directive": "rcpt_dir_01J9Z9",
+    "intent": null,
+    "request": null,
+    "decision": null,
+    "execution": null,
+    "outcome": null,
+    "evidence_pack": null
+  }
+}

@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Keon.McpGateway/Keon.McpGateway.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Keon.McpGateway.Tests/Keon.McpGateway.Tests.csproj" />
+  </Folder>
+</Solution>

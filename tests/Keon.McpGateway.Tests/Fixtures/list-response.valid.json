@@ -1,0 +1,18 @@
+{
+  "correlation_id": "c01J9Z8Q6X4J5Y2P9H3K8M7N6",
+  "tools": [
+    {
+      "name": "keon.governed.execute.v1",
+      "version": "1.0.0",
+      "description": "Universal governed execution adapter",
+      "required_scopes": ["keon:mcp:invoke", "keon:execute"],
+      "risk_level": "high",
+      "input_schema": {
+        "type": "object"
+      },
+      "output_schema": {
+        "type": "object"
+      }
+    }
+  ]
+}
