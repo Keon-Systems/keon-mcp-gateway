@@ -6,6 +6,7 @@ using Keon.McpGateway.Contracts;
 using Keon.McpGateway.Runtime;
 using Keon.McpGateway.Spine;
 using Keon.McpGateway.Tools;
+using Microsoft.Data.Sqlite;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -94,6 +95,101 @@ app.MapGet("/health", async (RuntimeClient runtimeClient, CancellationToken ct) 
         status = "ok",
         runtime = status
     });
+});
+
+app.MapGet("/mcp/admin/ingress/{correlationId}", async (
+    HttpContext httpContext,
+    string correlationId,
+    string tenant_id,
+    string actor_id,
+    Microsoft.Extensions.Options.IOptions<IngressSpineOptions> ingressSpineOptions,
+    JwtValidator jwtValidator,
+    CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(tenant_id) || string.IsNullOrWhiteSpace(actor_id))
+    {
+        return Results.Json(
+            McpResults.Error(
+                CorrelationIdHelper.ResolveOrCreate(correlationId),
+                "keon.admin.ingress.v1",
+                "MCP_TOOL_SCHEMA_INVALID",
+                "tenant_id and actor_id query parameters are required.",
+                StatusCodes.Status400BadRequest,
+                false),
+            statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    httpContext.Items["tool"] = "keon.admin.ingress.v1";
+    var auth = await jwtValidator.ValidateAsync(httpContext, tenant_id, actor_id, new[] { "keon:mcp:list" }, ct);
+    if (auth.Error is not null)
+    {
+        return Results.Json(auth.Error, statusCode: auth.Error.Error.HttpStatus);
+    }
+
+    if (ingressSpineOptions.Value.ParsedMode == IngressSpineMode.Off)
+    {
+        return Results.NotFound(new
+        {
+            correlation_id = correlationId,
+            message = "Ingress spine is disabled."
+        });
+    }
+
+    try
+    {
+        await using var connection = new SqliteConnection(ingressSpineOptions.Value.ConnectionString);
+        await connection.OpenAsync(ct);
+
+        var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT event_type, receipt_id, payload_json, created_utc
+            FROM events
+            WHERE correlation_id = $correlation_id
+            ORDER BY created_utc, rowid;
+            """;
+        command.Parameters.AddWithValue("$correlation_id", correlationId);
+
+        var events = new List<object>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var payloadJson = reader.GetString(2);
+            var payload = JsonNode.Parse(payloadJson) as JsonObject;
+            events.Add(new
+            {
+                type = reader.GetString(0),
+                receipt_id = reader.GetString(1),
+                created_utc = reader.GetString(3),
+                payload = payload
+            });
+        }
+
+        if (events.Count == 0)
+        {
+            return Results.NotFound(new
+            {
+                correlation_id = correlationId,
+                message = "No ingress events found."
+            });
+        }
+
+        return Results.Json(new
+        {
+            correlation_id = correlationId,
+            events
+        });
+    }
+    catch (SqliteException ex) when (
+        ex.Message.Contains("no such table", StringComparison.OrdinalIgnoreCase) ||
+        ex.Message.Contains("unable to open database file", StringComparison.OrdinalIgnoreCase))
+    {
+        return Results.NotFound(new
+        {
+            correlation_id = correlationId,
+            message = "Ingress spine store not available."
+        });
+    }
 });
 
 app.MapPost("/mcp/tools/list", async (
