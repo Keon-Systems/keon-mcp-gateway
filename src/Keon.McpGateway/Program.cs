@@ -160,6 +160,15 @@ app.MapGet("/mcp/admin/ingress/{correlationId}", async (
         await using var connection = new SqliteConnection(ingressSpineOptions.Value.ConnectionString);
         await connection.OpenAsync(ct);
 
+        var pragmaCommand = connection.CreateCommand();
+        pragmaCommand.CommandText =
+            """
+            PRAGMA busy_timeout = 5000;
+            PRAGMA journal_mode = DELETE;
+            PRAGMA synchronous = NORMAL;
+            """;
+        await pragmaCommand.ExecuteNonQueryAsync(ct);
+
         var command = connection.CreateCommand();
         command.CommandText =
             """
@@ -209,6 +218,18 @@ app.MapGet("/mcp/admin/ingress/{correlationId}", async (
             correlation_id = correlationId,
             message = "Ingress spine store not available."
         });
+    }
+    catch (SqliteException ex) when (ex.SqliteErrorCode is 5 or 6)
+    {
+        return Results.Json(
+            McpResults.Error(
+                CorrelationIdHelper.ResolveOrCreate(correlationId),
+                "keon.admin.ingress.v1",
+                "MCP_TEMPORARILY_UNAVAILABLE",
+                "Ingress spine is busy. Retry shortly.",
+                StatusCodes.Status503ServiceUnavailable,
+                true),
+            statusCode: StatusCodes.Status503ServiceUnavailable);
     }
 })
 .RequireRateLimiting("mcp_admin");

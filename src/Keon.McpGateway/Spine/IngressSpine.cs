@@ -45,6 +45,7 @@ public sealed class SqliteIngressSpineSink : IIngressSpineSink
 {
     private readonly string _connectionString;
     private readonly SemaphoreSlim _initGate = new(1, 1);
+    private readonly SemaphoreSlim _writeGate = new(1, 1);
     private volatile bool _initialized;
 
     public SqliteIngressSpineSink(IOptions<IngressSpineOptions> options)
@@ -56,23 +57,37 @@ public sealed class SqliteIngressSpineSink : IIngressSpineSink
     {
         await EnsureInitializedAsync(ct);
 
-        await using var connection = new SqliteConnection(_connectionString);
-        await connection.OpenAsync(ct);
+        await _writeGate.WaitAsync(ct);
+        try
+        {
+            await ExecuteWithRetryAsync(
+                async token =>
+                {
+                    await using var connection = new SqliteConnection(_connectionString);
+                    await connection.OpenAsync(token);
+                    await ConfigureConnectionAsync(connection, token);
 
-        var command = connection.CreateCommand();
-        command.CommandText =
-            """
-            INSERT INTO events(event_id, event_type, correlation_id, receipt_id, payload_json, created_utc)
-            VALUES ($event_id, $event_type, $correlation_id, $receipt_id, $payload_json, $created_utc);
-            """;
-        command.Parameters.AddWithValue("$event_id", ingressEvent.EventId);
-        command.Parameters.AddWithValue("$event_type", ingressEvent.EventType);
-        command.Parameters.AddWithValue("$correlation_id", ingressEvent.CorrelationId);
-        command.Parameters.AddWithValue("$receipt_id", ingressEvent.ReceiptId);
-        command.Parameters.AddWithValue("$payload_json", ingressEvent.PayloadJson);
-        command.Parameters.AddWithValue("$created_utc", ingressEvent.CreatedUtc.ToString("O"));
+                    var command = connection.CreateCommand();
+                    command.CommandText =
+                        """
+                        INSERT INTO events(event_id, event_type, correlation_id, receipt_id, payload_json, created_utc)
+                        VALUES ($event_id, $event_type, $correlation_id, $receipt_id, $payload_json, $created_utc);
+                        """;
+                    command.Parameters.AddWithValue("$event_id", ingressEvent.EventId);
+                    command.Parameters.AddWithValue("$event_type", ingressEvent.EventType);
+                    command.Parameters.AddWithValue("$correlation_id", ingressEvent.CorrelationId);
+                    command.Parameters.AddWithValue("$receipt_id", ingressEvent.ReceiptId);
+                    command.Parameters.AddWithValue("$payload_json", ingressEvent.PayloadJson);
+                    command.Parameters.AddWithValue("$created_utc", ingressEvent.CreatedUtc.ToString("O"));
 
-        await command.ExecuteNonQueryAsync(ct);
+                    await command.ExecuteNonQueryAsync(token);
+                },
+                ct);
+        }
+        finally
+        {
+            _writeGate.Release();
+        }
     }
 
     private async Task EnsureInitializedAsync(CancellationToken ct)
@@ -90,24 +105,30 @@ public sealed class SqliteIngressSpineSink : IIngressSpineSink
                 return;
             }
 
-            await using var connection = new SqliteConnection(_connectionString);
-            await connection.OpenAsync(ct);
+            await ExecuteWithRetryAsync(
+                async token =>
+                {
+                    await using var connection = new SqliteConnection(_connectionString);
+                    await connection.OpenAsync(token);
+                    await ConfigureConnectionAsync(connection, token);
 
-            var command = connection.CreateCommand();
-            command.CommandText =
-                """
-                CREATE TABLE IF NOT EXISTS events(
-                  event_id TEXT PRIMARY KEY,
-                  event_type TEXT NOT NULL,
-                  correlation_id TEXT NOT NULL,
-                  receipt_id TEXT NOT NULL,
-                  payload_json TEXT NOT NULL,
-                  created_utc TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_events_correlation_id ON events(correlation_id);
-                """;
+                    var command = connection.CreateCommand();
+                    command.CommandText =
+                        """
+                        CREATE TABLE IF NOT EXISTS events(
+                          event_id TEXT PRIMARY KEY,
+                          event_type TEXT NOT NULL,
+                          correlation_id TEXT NOT NULL,
+                          receipt_id TEXT NOT NULL,
+                          payload_json TEXT NOT NULL,
+                          created_utc TEXT NOT NULL
+                        );
+                        CREATE INDEX IF NOT EXISTS idx_events_correlation_id ON events(correlation_id);
+                        """;
 
-            await command.ExecuteNonQueryAsync(ct);
+                    await command.ExecuteNonQueryAsync(token);
+                },
+                ct);
             _initialized = true;
         }
         finally
@@ -115,6 +136,40 @@ public sealed class SqliteIngressSpineSink : IIngressSpineSink
             _initGate.Release();
         }
     }
+
+    private static async Task ConfigureConnectionAsync(SqliteConnection connection, CancellationToken ct)
+    {
+        var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            PRAGMA busy_timeout = 5000;
+            PRAGMA journal_mode = DELETE;
+            PRAGMA synchronous = NORMAL;
+            """;
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task ExecuteWithRetryAsync(Func<CancellationToken, Task> operation, CancellationToken ct)
+    {
+        var delayMs = 100;
+        for (var attempt = 1; ; attempt++)
+        {
+            ct.ThrowIfCancellationRequested();
+            try
+            {
+                await operation(ct);
+                return;
+            }
+            catch (SqliteException ex) when (attempt < 5 && IsTransient(ex))
+            {
+                await Task.Delay(delayMs, ct);
+                delayMs *= 2;
+            }
+        }
+    }
+
+    private static bool IsTransient(SqliteException ex)
+        => ex.SqliteErrorCode is 5 or 6;
 }
 
 public sealed class IngressSpineException : Exception
@@ -201,7 +256,7 @@ public sealed class IngressSpineEmitter
         {
             if (Mode == IngressSpineMode.Required)
             {
-                throw new IngressSpineException($"Ingress spine append failed for {eventType}.", ex);
+                throw new IngressSpineException($"Ingress spine append failed for {eventType}: {ex.Message}", ex);
             }
 
             _logger.LogError(ex, "Ingress spine append failed for {EventType} on correlation {CorrelationId}", eventType, correlationId);
