@@ -192,3 +192,53 @@ The test suite covers:
 - live spine persistence for Directive, Intent, Request, and Outcome receipts
 - real `keon.launch.hardening.v1` execution wiring beyond the current governed decision stub
 - remote git hosting and PR publication
+
+## CI/CD
+
+### Workflows
+
+- PR validation: `.github/workflows/pr-validation.yml`
+- Staging deploy: `.github/workflows/deploy-staging.yml`
+
+### Required GitHub Secrets
+
+- `AZURE_CLIENT_ID`: Azure federated identity app client ID for GitHub OIDC login.
+- `AZURE_TENANT_ID`: Azure tenant ID for OIDC login.
+- `AZURE_SUBSCRIPTION_ID`: Azure subscription ID used for ACR/Container Apps operations.
+
+### Required GitHub Repository Variables
+
+- `ACR_NAME`: Azure Container Registry name (without FQDN).
+- `ACR_LOGIN_SERVER`: ACR login server (for example `myregistry.azurecr.io`).
+- `ACR_IMAGE_REPOSITORY`: Image repo path in ACR (for example `keon-mcp-gateway`).
+- `ACA_RESOURCE_GROUP`: Resource group containing the Container App.
+- `ACA_APP_NAME`: Azure Container App name for staging.
+- `STAGING_HEALTHCHECK_URL` (optional): Override health URL. If omitted, workflow uses `https://<container-app-fqdn>/health`.
+
+### Branch Protection and Required Checks
+
+Configure `main` as a protected branch and require successful checks:
+
+- `Restore, Build, Test, Python Smoke` (from PR Validation)
+
+Recommended protections:
+
+- Require pull request before merging.
+- Require linear history or squash merge.
+- Restrict who can push directly to `main`.
+- Require status checks to pass before merge.
+
+### Fork PR Safety
+
+- Staging deploy workflow does not run on pull requests.
+- Deploy executes only on protected `main` or manual `workflow_dispatch` against protected `main`.
+- Staging environment approvals (if enabled in GitHub Environments) gate deployment.
+
+### Break-Glass Rollback Runbook (Staging)
+
+1. Identify the last known-good image tag (`<acr-login-server>/<repo>:<commit-sha>`).
+2. Authenticate to Azure with least-privilege operator credentials.
+3. Roll back Container App image:
+   `az containerapp update --name <app-name> --resource-group <rg> --image <acr-login-server>/<repo>:<known-good-sha>`
+4. Run smoke check against `/health` and verify HTTP 200.
+5. Capture rollback details (image tag, operator, timestamp, reason) in incident notes.
