@@ -54,6 +54,26 @@ builder.Services.AddRateLimiter(options =>
                 AutoReplenishment = true
             });
     });
+
+    options.AddPolicy("mcp_admin", httpContext =>
+    {
+        var rateLimitingOptions = httpContext.RequestServices.GetRequiredService<Microsoft.Extensions.Options.IOptions<RateLimitingOptions>>().Value;
+        if (!rateLimitingOptions.Enabled)
+        {
+            return RateLimitPartition.GetNoLimiter("mcp_admin_disabled");
+        }
+
+        return RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: "mcp_admin:/mcp/admin/ingress",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = rateLimitingOptions.AdminPermitLimit,
+                Window = TimeSpan.FromSeconds(rateLimitingOptions.WindowSeconds),
+                QueueLimit = 0,
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                AutoReplenishment = true
+            });
+    });
 });
 
 builder.Services.AddHttpClient();
@@ -137,8 +157,15 @@ app.MapGet("/mcp/admin/ingress/{correlationId}", async (
 
     try
     {
-        await using var connection = new SqliteConnection(ingressSpineOptions.Value.ConnectionString);
+        await using var connection = new SqliteConnection(SqliteConnectionStringFactory.Normalize(ingressSpineOptions.Value.ConnectionString));
         await connection.OpenAsync(ct);
+
+        var pragmaCommand = connection.CreateCommand();
+        pragmaCommand.CommandText =
+            """
+            PRAGMA busy_timeout = 5000;
+            """;
+        await pragmaCommand.ExecuteNonQueryAsync(ct);
 
         var command = connection.CreateCommand();
         command.CommandText =
@@ -167,10 +194,26 @@ app.MapGet("/mcp/admin/ingress/{correlationId}", async (
 
         if (events.Count == 0)
         {
-            return Results.NotFound(new
+            var fallbackEvents = await IngressSpineFallbackStore.ReadAsync(ingressSpineOptions.Value.ConnectionString, correlationId, ct);
+            if (fallbackEvents.Count == 0)
+            {
+                return Results.NotFound(new
+                {
+                    correlation_id = correlationId,
+                    message = "No ingress events found."
+                });
+            }
+
+            return Results.Json(new
             {
                 correlation_id = correlationId,
-                message = "No ingress events found."
+                events = fallbackEvents.Select(e => new
+                {
+                    type = e.Type,
+                    receipt_id = e.ReceiptId,
+                    created_utc = e.CreatedUtc,
+                    payload = e.Payload
+                }).ToList()
             });
         }
 
@@ -184,13 +227,42 @@ app.MapGet("/mcp/admin/ingress/{correlationId}", async (
         ex.Message.Contains("no such table", StringComparison.OrdinalIgnoreCase) ||
         ex.Message.Contains("unable to open database file", StringComparison.OrdinalIgnoreCase))
     {
+        var fallbackEvents = await IngressSpineFallbackStore.ReadAsync(ingressSpineOptions.Value.ConnectionString, correlationId, ct);
+        if (fallbackEvents.Count > 0)
+        {
+            return Results.Json(new
+            {
+                correlation_id = correlationId,
+                events = fallbackEvents.Select(e => new
+                {
+                    type = e.Type,
+                    receipt_id = e.ReceiptId,
+                    created_utc = e.CreatedUtc,
+                    payload = e.Payload
+                }).ToList()
+            });
+        }
+
         return Results.NotFound(new
         {
             correlation_id = correlationId,
             message = "Ingress spine store not available."
         });
     }
-});
+    catch (SqliteException ex) when (ex.SqliteErrorCode is 5 or 6)
+    {
+        return Results.Json(
+            McpResults.Error(
+                CorrelationIdHelper.ResolveOrCreate(correlationId),
+                "keon.admin.ingress.v1",
+                "MCP_TEMPORARILY_UNAVAILABLE",
+                "Ingress spine is busy. Retry shortly.",
+                StatusCodes.Status503ServiceUnavailable,
+                true),
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+})
+.RequireRateLimiting("mcp_admin");
 
 app.MapPost("/mcp/tools/list", async (
     HttpContext httpContext,
