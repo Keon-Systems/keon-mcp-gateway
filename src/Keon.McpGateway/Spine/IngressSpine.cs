@@ -280,17 +280,17 @@ public static class IngressSpineFallbackStore
                 continue;
             }
 
-            var parsed = JsonSerializerHelper.Deserialize<FallbackEvent>(line);
-            if (parsed.Value is null)
+            var parsed = JsonSerializer.Deserialize<FallbackEvent>(line);
+            if (parsed is null)
             {
                 continue;
             }
 
             events.Add(new IngressSpineOracleEvent(
-                parsed.Value.Type,
-                parsed.Value.ReceiptId,
-                parsed.Value.CreatedUtc,
-                JsonNode.Parse(parsed.Value.PayloadJson) as JsonObject));
+                parsed.Type,
+                parsed.ReceiptId,
+                parsed.CreatedUtc,
+                JsonNode.Parse(parsed.PayloadJson) as JsonObject));
         }
 
         return events;
