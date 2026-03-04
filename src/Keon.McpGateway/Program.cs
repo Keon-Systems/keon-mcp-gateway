@@ -15,7 +15,7 @@ builder.Services.Configure<IngressSpineOptions>(builder.Configuration.GetSection
 builder.Services.Configure<RateLimitingOptions>(builder.Configuration.GetSection("RateLimiting"));
 builder.Services.Configure<SchemaOptions>(options =>
 {
-    options.SchemaPath = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "..", "contracts", "mcp_gateway.v1.schema.json"));
+    options.SchemaPath = SchemaPathResolver.ResolveGatewaySchema(builder.Environment.ContentRootPath);
 });
 builder.Services.AddRateLimiter(options =>
 {
