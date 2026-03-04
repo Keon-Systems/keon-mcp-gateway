@@ -111,11 +111,17 @@ public sealed class SqliteIngressSpineSink : IIngressSpineSink
                     await using var connection = new SqliteConnection(_connectionString);
                     await connection.OpenAsync(token);
 
-                    var command = connection.CreateCommand();
-                    command.CommandText =
+                    var pragmaCommand = connection.CreateCommand();
+                    pragmaCommand.CommandText =
                         """
                         PRAGMA journal_mode = DELETE;
                         PRAGMA synchronous = NORMAL;
+                        """;
+                    await pragmaCommand.ExecuteNonQueryAsync(token);
+
+                    var command = connection.CreateCommand();
+                    command.CommandText =
+                        """
                         CREATE TABLE IF NOT EXISTS events(
                           event_id TEXT PRIMARY KEY,
                           event_type TEXT NOT NULL,
