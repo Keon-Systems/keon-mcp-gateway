@@ -1,0 +1,142 @@
+name: Deploy Staging
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/Keon.McpGateway/**"
+      - "tests/Keon.McpGateway.Tests/**"
+      - "contracts/**"
+      - "Keon.McpGateway.slnx"
+      - ".github/workflows/deploy-staging.yml"
+  workflow_dispatch:
+    inputs:
+      deploy_reason:
+        description: "Reason for manual staging deployment"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-staging-keon-mcp-gateway
+  cancel-in-progress: false
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  IMAGE_REPOSITORY: ${{ vars.ACR_IMAGE_REPOSITORY || 'keon-mcp-gateway' }}
+
+jobs:
+  deploy:
+    name: Build, Push, Deploy to Staging
+    if: github.ref == 'refs/heads/main' && github.ref_protected == true
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET from global.json
+        if: hashFiles('global.json') != ''
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Setup .NET (LTS fallback)
+        if: hashFiles('global.json') == ''
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore, build, and test before deploy
+        run: |
+          dotnet restore Keon.McpGateway.slnx --nologo --verbosity minimal
+          dotnet build Keon.McpGateway.slnx --configuration Release --no-restore --nologo --verbosity minimal
+          dotnet test Keon.McpGateway.slnx --configuration Release --no-build --nologo --verbosity minimal
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Azure CLI version
+        uses: azure/cli@v2
+        with:
+          inlineScript: az version
+
+      - name: ACR login with Azure identity
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az acr login --name "${{ vars.ACR_NAME }}"
+
+      - name: Build and push immutable image
+        id: image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: src/Keon.McpGateway/Dockerfile
+          push: true
+          tags: ${{ vars.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.sha }}
+
+      - name: Deploy Container App revision
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az containerapp update \
+              --name "${{ vars.ACA_APP_NAME }}" \
+              --resource-group "${{ vars.ACA_RESOURCE_GROUP }}" \
+              --image "${{ vars.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.sha }}"
+
+      - name: Post-deploy smoke check
+        shell: bash
+        run: |
+          APP_FQDN="$(az containerapp show --name "${{ vars.ACA_APP_NAME }}" --resource-group "${{ vars.ACA_RESOURCE_GROUP }}" --query properties.configuration.ingress.fqdn -o tsv)"
+          DEFAULT_HEALTH_URL="https://${APP_FQDN}/health"
+          HEALTH_URL="${{ vars.STAGING_HEALTHCHECK_URL }}"
+          if [ -z "${HEALTH_URL}" ]; then
+            HEALTH_URL="${DEFAULT_HEALTH_URL}"
+          fi
+          echo "Smoke checking ${HEALTH_URL}"
+          curl --fail --silent --show-error --max-time 20 "${HEALTH_URL}" >/dev/null
+
+      - name: Publish deployment metadata artifact
+        shell: bash
+        run: |
+          cat <<EOF > deployment-metadata.txt
+          image=${{ vars.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.sha }}
+          revision=${{ github.run_id }}.${{ github.run_attempt }}
+          commit=${{ github.sha }}
+          actor=${{ github.actor }}
+          ref=${{ github.ref }}
+          workflow=${{ github.workflow }}
+          EOF
+
+      - name: Upload deployment metadata artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateway-staging-deployment-${{ github.sha }}
+          path: deployment-metadata.txt
+          retention-days: 30
+
+      - name: Deployment summary
+        shell: bash
+        run: |
+          {
+            echo "## Staging Deployment Summary"
+            echo ""
+            echo "- Image: \`${{ vars.ACR_LOGIN_SERVER }}/${{ env.IMAGE_REPOSITORY }}:${{ github.sha }}\`"
+            echo "- Revision: \`${{ github.run_id }}.${{ github.run_attempt }}\`"
+            echo "- Commit: \`${{ github.sha }}\`"
+            echo "- Actor: \`${{ github.actor }}\`"
+            echo "- Protected ref: \`${{ github.ref_protected }}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"

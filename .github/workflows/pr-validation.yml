@@ -1,0 +1,91 @@
+name: PR Validation
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "**/*.cs"
+      - "**/*.csproj"
+      - "**/*.sln"
+      - "**/*.slnx"
+      - "Directory.Build.props"
+      - "Directory.Build.targets"
+      - "global.json"
+      - "NuGet.config"
+      - "**/*.py"
+      - "**/requirements*.txt"
+      - "pyproject.toml"
+      - ".github/workflows/pr-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-validation-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  PYTHONDONTWRITEBYTECODE: 1
+  PYTHONUNBUFFERED: 1
+
+jobs:
+  validate:
+    name: Restore, Build, Test, Python Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET from global.json
+        if: hashFiles('global.json') != ''
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Setup .NET (LTS fallback)
+        if: hashFiles('global.json') == ''
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore Keon.McpGateway.slnx --nologo --verbosity minimal
+
+      - name: Build
+        run: dotnet build Keon.McpGateway.slnx --configuration Release --no-restore --nologo --verbosity minimal
+
+      - name: Test
+        run: dotnet test Keon.McpGateway.slnx --configuration Release --no-build --nologo --verbosity minimal
+
+      - name: Setup Python
+        if: hashFiles('**/*.py') != ''
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python syntax smoke
+        if: hashFiles('**/*.py') != ''
+        shell: bash
+        run: |
+          python -m compileall -q examples
+
+      - name: Job summary
+        if: always()
+        shell: bash
+        run: |
+          PY_STATUS="not applicable"
+          if find examples -type f -name '*.py' -print -quit 2>/dev/null | grep -q .; then
+            PY_STATUS="completed"
+          fi
+          {
+            echo "## PR Validation Summary"
+            echo ""
+            echo "- Job status: \`${{ job.status }}\`"
+            echo "- Python smoke checks: ${PY_STATUS}"
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Actor: \`${GITHUB_ACTOR}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
