@@ -14,14 +14,20 @@ internal sealed class GatewayApplicationFactory : WebApplicationFactory<Program>
     private readonly IngressSpineMode _ingressSpineMode;
     private readonly string _ingressConnectionString;
     private readonly IIngressSpineSink? _sinkOverride;
+    private readonly bool _rateLimitingEnabled;
+    private readonly int _rateLimitingPermitLimit;
+    private readonly int _rateLimitingWindowSeconds;
 
-    public GatewayApplicationFactory(string runtimeBaseUrl, string publicKeyPem, IngressSpineMode ingressSpineMode = IngressSpineMode.Off, string? ingressConnectionString = null, IIngressSpineSink? sinkOverride = null)
+    public GatewayApplicationFactory(string runtimeBaseUrl, string publicKeyPem, IngressSpineMode ingressSpineMode = IngressSpineMode.Off, string? ingressConnectionString = null, IIngressSpineSink? sinkOverride = null, bool rateLimitingEnabled = false, int rateLimitingPermitLimit = 20, int rateLimitingWindowSeconds = 60)
     {
         _runtimeBaseUrl = runtimeBaseUrl;
         _publicKeyPem = publicKeyPem;
         _ingressSpineMode = ingressSpineMode;
         _ingressConnectionString = ingressConnectionString ?? "Data Source=:memory:";
         _sinkOverride = sinkOverride;
+        _rateLimitingEnabled = rateLimitingEnabled;
+        _rateLimitingPermitLimit = rateLimitingPermitLimit;
+        _rateLimitingWindowSeconds = rateLimitingWindowSeconds;
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -39,6 +45,9 @@ internal sealed class GatewayApplicationFactory : WebApplicationFactory<Program>
                 ["Runtime:MaxRetries"] = "2",
                 ["IngressSpine:Mode"] = _ingressSpineMode.ToString(),
                 ["IngressSpine:ConnectionString"] = _ingressConnectionString,
+                ["RateLimiting:Enabled"] = _rateLimitingEnabled.ToString(),
+                ["RateLimiting:PermitLimit"] = _rateLimitingPermitLimit.ToString(),
+                ["RateLimiting:WindowSeconds"] = _rateLimitingWindowSeconds.ToString(),
                 ["Auth:Issuer"] = "keon-auth",
                 ["Auth:Audience"] = "keon-mcp-gateway",
                 ["Auth:JwtPublicKeyPem"] = _publicKeyPem,

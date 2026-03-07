@@ -99,7 +99,7 @@ public sealed class JwtValidator
         if (!string.IsNullOrWhiteSpace(_options.JwtPublicKeyPem))
         {
             using var rsa = RSA.Create();
-            rsa.ImportFromPem(_options.JwtPublicKeyPem);
+            rsa.ImportFromPem(NormalizePem(_options.JwtPublicKeyPem));
             return [new RsaSecurityKey(rsa.ExportParameters(false))];
         }
 
@@ -112,4 +112,8 @@ public sealed class JwtValidator
         var jwksJson = await client.GetStringAsync(_options.JwksUrl, ct);
         return new JsonWebKeySet(jwksJson).Keys.Cast<SecurityKey>().ToArray();
     }
+
+    private static string NormalizePem(string pem)
+        => pem.Replace("\\r", "\r", StringComparison.Ordinal)
+              .Replace("\\n", "\n", StringComparison.Ordinal);
 }
