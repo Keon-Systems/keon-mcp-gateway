@@ -187,6 +187,36 @@ public sealed class GatewayIntegrationTests
     }
 
     [Fact]
+    public async Task Tools_list_without_schemas_omits_schema_fields_and_returns_registered_tools()
+    {
+        await using var runtime = new MockRuntimeServer(new RuntimeBehavior());
+        using var issuer = new TestTokenIssuer();
+        await using var factory = new GatewayApplicationFactory(runtime.BaseUrl, issuer.PublicKeyPem);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", issuer.CreateToken("tnt_123", "usr_456", "keon:mcp:list"));
+
+        var response = await client.PostAsJsonAsync("/mcp/tools/list", new
+        {
+            tenant_id = "tnt_123",
+            actor_id = "usr_456",
+            include_schemas = false
+        });
+
+        var text = await response.Content.ReadAsStringAsync();
+        Assert.True(response.StatusCode == HttpStatusCode.OK, text);
+
+        var body = JsonNode.Parse(text)!.AsObject();
+        var tools = body["tools"]!.AsArray();
+        Assert.Equal(2, tools.Count);
+        Assert.All(tools, toolNode =>
+        {
+            var tool = Assert.IsType<JsonObject>(toolNode);
+            Assert.False(tool.ContainsKey("input_schema"));
+            Assert.False(tool.ContainsKey("output_schema"));
+        });
+    }
+
+    [Fact]
     public async Task Required_mode_sink_failure_on_directive_fails_closed_before_runtime_call()
     {
         await using var runtime = new MockRuntimeServer(new RuntimeBehavior());
@@ -342,5 +372,39 @@ public sealed class GatewayIntegrationTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.True(body!["ok"]!.GetValue<bool>());
         Assert.True(failingSink.CallCount >= 3);
+    }
+
+    [Fact]
+    public async Task Tools_list_rate_limited_returns_429()
+    {
+        await using var runtime = new MockRuntimeServer(new RuntimeBehavior());
+        using var issuer = new TestTokenIssuer();
+        await using var factory = new GatewayApplicationFactory(
+            runtime.BaseUrl,
+            issuer.PublicKeyPem,
+            rateLimitingEnabled: true,
+            rateLimitingPermitLimit: 1,
+            rateLimitingWindowSeconds: 60);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", issuer.CreateToken("tnt_123", "usr_456", "keon:mcp:list"));
+
+        var first = await client.PostAsJsonAsync("/mcp/tools/list", new
+        {
+            tenant_id = "tnt_123",
+            actor_id = "usr_456",
+            include_schemas = false
+        });
+
+        var second = await client.PostAsJsonAsync("/mcp/tools/list", new
+        {
+            tenant_id = "tnt_123",
+            actor_id = "usr_456",
+            include_schemas = false
+        });
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal((HttpStatusCode)429, second.StatusCode);
+        var body = await second.Content.ReadFromJsonAsync<JsonObject>();
+        Assert.Equal("MCP_RATE_LIMITED", body!["error"]!["code"]!.GetValue<string>());
     }
 }

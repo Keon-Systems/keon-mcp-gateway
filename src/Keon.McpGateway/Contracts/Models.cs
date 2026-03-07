@@ -134,7 +134,9 @@ public sealed record ToolDefinition(
     [property: JsonPropertyName("description")] string Description,
     [property: JsonPropertyName("required_scopes")] IReadOnlyList<string> RequiredScopes,
     [property: JsonPropertyName("risk_level")] string RiskLevel,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     [property: JsonPropertyName("input_schema")] JsonObject? InputSchema,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     [property: JsonPropertyName("output_schema")] JsonObject? OutputSchema);
 
 public sealed record DecisionEnvelope(

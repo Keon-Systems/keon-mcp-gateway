@@ -2,6 +2,7 @@ using System.Text.Json.Nodes;
 using System.Threading.RateLimiting;
 using Keon.McpGateway;
 using Keon.McpGateway.Auth;
+using Keon.McpGateway.ControlPlane;
 using Keon.McpGateway.Contracts;
 using Keon.McpGateway.Runtime;
 using Keon.McpGateway.Spine;
@@ -12,6 +13,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<RuntimeOptions>(builder.Configuration.GetSection("Runtime"));
 builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection("Auth"));
+builder.Services.Configure<ControlPlaneOptions>(builder.Configuration.GetSection("ControlPlane"));
 builder.Services.Configure<IngressSpineOptions>(builder.Configuration.GetSection("IngressSpine"));
 builder.Services.Configure<RateLimitingOptions>(builder.Configuration.GetSection("RateLimiting"));
 builder.Services.Configure<SchemaOptions>(options =>
@@ -78,8 +80,11 @@ builder.Services.AddRateLimiter(options =>
 
 builder.Services.AddHttpClient();
 builder.Services.AddHttpClient<RuntimeClient>();
+builder.Services.AddHttpClient<ControlPlaneClient>();
 builder.Services.AddSingleton<SchemaRegistry>();
 builder.Services.AddSingleton<JwtValidator>();
+builder.Services.AddSingleton<ApiKeyValidator>();
+builder.Services.AddSingleton<UsageEventOutbox>();
 builder.Services.AddSingleton<DirectiveFactory>();
 builder.Services.AddSingleton<IntentFactory>();
 builder.Services.AddSingleton<InvokeTerminalWriter>();
@@ -325,7 +330,26 @@ app.MapPost("/mcp/tools/invoke", async (
     var request = invokeRequestResult.Value;
     httpContext.Items["tool"] = request.Tool;
 
-    var auth = await jwtValidator.ValidateAsync(httpContext, request.TenantId, request.ActorId, toolRegistry.GetRequiredScopes(request.Tool), ct);
+    var hasApiKey = !string.IsNullOrWhiteSpace(httpContext.Request.Headers["X-Api-Key"].FirstOrDefault());
+    AuthResult auth;
+    GatewayApiKeySnapshot? apiKeySnapshot = null;
+    if (hasApiKey)
+    {
+        var apiKeyAuth = await httpContext.RequestServices.GetRequiredService<ApiKeyValidator>().ValidateAsync(httpContext, request, ct);
+        if (apiKeyAuth.Error is not null)
+        {
+            return Results.Json(apiKeyAuth.Error, statusCode: apiKeyAuth.Error.Error.HttpStatus);
+        }
+
+        apiKeySnapshot = apiKeyAuth.Context!.ApiKey;
+        auth = new AuthResult(new AuthSuccess(apiKeyAuth.Context.Principal), null);
+        httpContext.Items["api_key_snapshot"] = apiKeySnapshot;
+    }
+    else
+    {
+        auth = await jwtValidator.ValidateAsync(httpContext, request.TenantId, request.ActorId, toolRegistry.GetRequiredScopes(request.Tool), ct);
+    }
+
     if (auth.Error is not null)
     {
         return Results.Json(auth.Error, statusCode: auth.Error.Error.HttpStatus);
@@ -380,6 +404,18 @@ app.MapPost("/mcp/tools/invoke", async (
         var failClosed = McpResults.Error(correlationId, request.Tool, "GOVERNANCE_FAIL_CLOSED", responseValidation.Message, StatusCodes.Status500InternalServerError, false, directive.ReceiptId);
         var finalizedFailClosed = await terminalWriter.FinalizeAsync(StatusCodes.Status500InternalServerError, failClosed, correlationId, request.Tool, directive, ingressSpineEmitter, ct);
         return Results.Json(finalizedFailClosed.Body, statusCode: finalizedFailClosed.StatusCode);
+    }
+
+    if (apiKeySnapshot is not null && result.Body is McpSuccessResponse successBody)
+    {
+        var outbox = httpContext.RequestServices.GetRequiredService<UsageEventOutbox>();
+        var stored = await outbox.EnqueueAsync(request, successBody, apiKeySnapshot, ct);
+        if (!stored)
+        {
+            var failClosed = McpResults.Error(correlationId, request.Tool, "USAGE_EVENT_OUTBOX_FAILED", "Terminal decision could not be durably queued for metering.", StatusCodes.Status502BadGateway, true, directive.ReceiptId);
+            var finalizedFailure = await terminalWriter.FinalizeAsync(StatusCodes.Status502BadGateway, failClosed, correlationId, request.Tool, directive, ingressSpineEmitter, ct);
+            return Results.Json(finalizedFailure.Body, statusCode: finalizedFailure.StatusCode);
+        }
     }
 
     var finalized = await terminalWriter.FinalizeAsync(result.StatusCode, result.Body, correlationId, request.Tool, directive, ingressSpineEmitter, ct);
